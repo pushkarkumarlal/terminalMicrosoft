@@ -80,6 +80,7 @@ public:
     // row manipulation
     const ROW& GetRowByOffset(const til::CoordType index) const noexcept;
     ROW& GetRowByOffset(const til::CoordType index) noexcept;
+    void ResetRowByOffset(til::CoordType index, const TextAttribute& attr) noexcept;
 
     TextBufferCellIterator GetCellDataAt(const til::point at) const;
     TextBufferCellIterator GetCellLineDataAt(const til::point at) const;
@@ -138,7 +139,7 @@ public:
     til::point ScreenToBufferPosition(const til::point position) const noexcept;
     til::point BufferToScreenPosition(const til::point position) const noexcept;
 
-    void Reset();
+    void Reset() noexcept;
 
     [[nodiscard]] HRESULT ResizeTraditional(const til::size newSize) noexcept;
 
@@ -219,8 +220,16 @@ public:
     interval_tree::IntervalTree<til::point, size_t> GetPatterns(const til::CoordType firstRow, const til::CoordType lastRow) const;
 
 private:
-    static wil::unique_virtualalloc_ptr<std::byte> _allocateBuffer(til::size sz, const TextAttribute& attributes, std::vector<ROW>& rows);
+    struct VirtualAllocation
+    {
+        wil::unique_virtualalloc_ptr<std::byte> ptr;
+        size_t size = 0;
+    };
 
+    static VirtualAllocation _allocateBuffer(til::size sz, const TextAttribute& attributes, ROW& scratchpadRow, std::vector<ROW>& rows);
+
+    const ROW& _getRowByOffsetNoInit(til::CoordType index) const noexcept;
+    ROW& _getRowByOffsetNoInit(til::CoordType index) noexcept;
     void _UpdateSize();
     void _SetFirstRowIndex(const til::CoordType FirstRowIndex) noexcept;
     til::point _GetPreviousFromCursor() const noexcept;
@@ -229,7 +238,6 @@ private:
     // Assist with maintaining proper buffer state for Double Byte character sequences
     bool _PrepareForDoubleByteSequence(const DbcsAttribute dbcsAttribute);
     bool _AssertValidDoubleByteSequence(const DbcsAttribute dbcsAttribute);
-    ROW& _GetFirstRow() noexcept;
     void _ExpandTextRow(til::inclusive_rect& selectionRow) const;
     DelimiterClass _GetDelimiterClassAt(const til::point pos, const std::wstring_view wordDelimiters) const noexcept;
     til::point _GetWordStartForAccessibility(const til::point target, const std::wstring_view wordDelimiters) const noexcept;
@@ -249,7 +257,8 @@ private:
     std::unordered_map<size_t, std::wstring> _idsAndPatterns;
     size_t _currentPatternId = 0;
 
-    wil::unique_virtualalloc_ptr<std::byte> _charBuffer;
+    VirtualAllocation _buffer;
+    ROW _scratchpadRow;
     std::vector<ROW> _storage;
     TextAttribute _currentAttributes;
     til::CoordType _firstRow = 0; // indexes top row (not necessarily 0)

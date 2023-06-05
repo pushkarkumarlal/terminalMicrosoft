@@ -60,6 +60,9 @@ struct RowWriteState
 class ROW final
 {
 public:
+    static size_t CalculateBufferStride(size_t columns) noexcept;
+    static size_t CalculateCharsBufferSize(size_t columns) noexcept;
+
     ROW() = default;
     ROW(wchar_t* charsBuffer, uint16_t* charOffsetsBuffer, uint16_t rowWidth, const TextAttribute& fillAttribute);
 
@@ -76,7 +79,9 @@ public:
     void SetLineRendition(const LineRendition lineRendition) noexcept;
     LineRendition GetLineRendition() const noexcept;
 
-    void Reset(const TextAttribute& attr);
+    bool IsInitialized() const noexcept;
+    void Initialize() noexcept;
+    void Reset(const TextAttribute& attr) noexcept;
     void TransferAttributes(const til::small_rle<TextAttribute, uint16_t, 1>& attr, til::CoordType newWidth);
 
     til::CoordType NavigateToPrevious(til::CoordType column) const noexcept;
@@ -121,7 +126,7 @@ private:
         bool IsValid() const noexcept;
         void ReplaceCharacters(til::CoordType width) noexcept;
         void ReplaceText() noexcept;
-        void ReplaceTextUnicode(size_t ch, std::wstring_view::const_iterator it, const std::wstring_view::const_iterator end);
+        void ReplaceTextUnicode(size_t ch, std::wstring_view::const_iterator it, const std::wstring_view::const_iterator end) noexcept;
         void CopyRangeFrom(const std::span<const uint16_t>& charOffsets) noexcept;
         void Finish();
 
@@ -179,7 +184,7 @@ private:
     uint16_t _uncheckedCharOffset(size_t col) const noexcept;
     bool _uncheckedIsTrailer(size_t col) const noexcept;
 
-    void _init() noexcept;
+    void _safeReset() noexcept;
     void _resizeChars(uint16_t colEndDirty, uint16_t chBegDirty, size_t chEndDirty, uint16_t chEndDirtyOld);
 
     // These fields are a bit "wasteful", but it makes all this a bit more robust against
@@ -233,6 +238,7 @@ private:
     bool _wrapForced = false;
     // Occurs when the user runs out of text to support a double byte character and we're forced to the next line
     bool _doubleBytePadded = false;
+    bool _initialized = false;
 };
 
 #ifdef UNIT_TESTING

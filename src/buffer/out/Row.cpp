@@ -9,6 +9,8 @@
 #include "textBuffer.hpp"
 #include "../../types/inc/GlyphWidth.hpp"
 
+extern "C" long __isa_enabled;
+
 // The STL is missing a std::iota_n analogue for std::iota, so I made my own.
 template<typename OutIt, typename Diff, typename T>
 constexpr OutIt iota_n(OutIt dest, Diff count, T val)
@@ -68,6 +70,27 @@ constexpr OutIt copy_n_small(InIt first, Diff count, OutIt dest)
     return dest;
 }
 
+// The implicit agreement between ROW and TextBuffer is that each ROW gets a
+// `columns` sized array of `wchar_t` as its `charsBuffer` argument and a
+// `columns + 1` sized array of `uint16_t` as its `charOffsetsBuffer` argument.
+// The former is used as a scratch buffer fitting any BMP codepoints into the
+// ROW without the need for extra heap allocations and the latter stores the
+// column-to-start-of-character association. It has 1 more entry than needed
+// because that one serves as the past-the-end _chars pointer. The expectation
+// is that these two arrays are given to ROW laid out in memory back-to-back.
+//
+// This method exists to make this agreement explicit and serve as a reminder.
+size_t ROW::CalculateBufferStride(size_t columns) noexcept
+{
+    return ((columns + 8) & ~7) * 4;
+}
+
+// This function returns the size of the first part (the `columns` sized `wchar_t` array).
+size_t ROW::CalculateCharsBufferSize(size_t columns) noexcept
+{
+    return ((columns + 8) & ~7) * 2;
+}
+
 // Routine Description:
 // - constructor
 // Arguments:
@@ -82,10 +105,6 @@ ROW::ROW(wchar_t* charsBuffer, uint16_t* charOffsetsBuffer, uint16_t rowWidth, c
     _attr{ rowWidth, fillAttribute },
     _columnCount{ rowWidth }
 {
-    if (_chars.data())
-    {
-        _init();
-    }
 }
 
 void ROW::SetWrapForced(const bool wrap) noexcept
@@ -118,13 +137,12 @@ LineRendition ROW::GetLineRendition() const noexcept
     return _lineRendition;
 }
 
-// Routine Description:
-// - Sets all properties of the ROW to default values
-// Arguments:
-// - Attr - The default attribute (color) to fill
-// Return Value:
-// - <none>
-void ROW::Reset(const TextAttribute& attr)
+bool ROW::IsInitialized() const noexcept
+{
+    return _initialized;
+}
+
+void ROW::Reset(const TextAttribute& attr) noexcept
 {
     _charsHeap.reset();
     _chars = { _charsBuffer, _columnCount };
@@ -134,13 +152,109 @@ void ROW::Reset(const TextAttribute& attr)
     _lineRendition = LineRendition::SingleWidth;
     _wrapForced = false;
     _doubleBytePadded = false;
-    _init();
+    _initialized = false;
 }
 
-void ROW::_init() noexcept
+void ROW::Initialize() noexcept
 {
-    std::fill_n(_chars.begin(), _columnCount, UNICODE_SPACE);
-    std::iota(_charOffsets.begin(), _charOffsets.end(), uint16_t{ 0 });
+    assert(!_initialized);
+    _initialized = true;
+
+#pragma warning(push)
+#pragma warning(disable : 26462) // The value pointed to by '...' is assigned only once, mark it as a pointer to const (con.4).
+#pragma warning(disable : 26481) // Don't use pointer arithmetic. Use span instead (bounds.1).
+#pragma warning(disable : 26490) // Don't use reinterpret_cast (type.1).
+
+    // Fills _charsBuffer with whitespace and correspondingly _charOffsets
+    // with successive numbers from 0 to _columnCount+1.
+#if defined(TIL_SSE_INTRINSICS)
+    alignas(__m256i) static constexpr uint16_t offsetsData[]{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+
+    if ((__isa_enabled & (1 << __ISA_AVAILABLE_AVX2)) && _columnCount >= 16)
+    {
+        auto chars = _charsBuffer;
+        auto charOffsets = _charOffsets.data();
+
+        const auto tailColumnOffset = gsl::narrow_cast<uint16_t>((_columnCount - 8u) & ~7);
+        const auto charsEndLoop = chars + tailColumnOffset;
+        const auto charOffsetsEndLoop = charOffsets + tailColumnOffset;
+
+        const auto whitespace = _mm256_set1_epi16(L' ');
+        auto offsetsLoop = _mm256_load_si256(reinterpret_cast<const __m256i*>(&offsetsData[0]));
+        const auto offsets = _mm256_add_epi16(offsetsLoop, _mm256_set1_epi16(tailColumnOffset));
+
+        if (chars < charsEndLoop)
+        {
+            const auto increment = _mm256_set1_epi16(16);
+
+            do
+            {
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(chars), whitespace);
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(charOffsets), offsetsLoop);
+                offsetsLoop = _mm256_add_epi16(offsetsLoop, increment);
+                chars += 16;
+                charOffsets += 16;
+            } while (chars < charsEndLoop);
+        }
+
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(charsEndLoop), whitespace);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(charOffsetsEndLoop), offsets);
+    }
+    else
+    {
+        auto chars = _charsBuffer;
+        auto charOffsets = _charOffsets.data();
+        const auto charsEnd = chars + _columnCount;
+
+        const auto whitespace = _mm_set1_epi16(L' ');
+        const auto increment = _mm_set1_epi16(8);
+        auto offsets = _mm_load_si128(reinterpret_cast<const __m128i*>(&offsetsData[0]));
+
+        do
+        {
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(chars), whitespace);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(charOffsets), offsets);
+            offsets = _mm_add_epi16(offsets, increment);
+            chars += 8;
+            charOffsets += 8;
+        } while (chars <= charsEnd);
+    }
+#elif defined(TIL_ARM_NEON_INTRINSICS)
+    alignas(uint16x8_t) static constexpr uint16_t offsetsData[]{ 0, 1, 2, 3, 4, 5, 6, 7 };
+
+    auto chars = _charsBuffer;
+    auto charOffsets = _charOffsets.data();
+    const auto charsEnd = chars + _columnCount;
+
+    const auto whitespace = vdupq_n_u16(L' ');
+    const auto increment = vdupq_n_u16(8);
+    auto offsets = vld1q_u16(&offsetsData[0]);
+
+    do
+    {
+        vst1q_u16(chars, whitespace);
+        vst1q_u16(charOffsets, offsets);
+        offsets = vaddq_u16(offsets, increment);
+        chars += 8;
+        charOffsets += 8;
+    } while (chars <= charsEnd);
+#else
+#error "This method benefits greatly from vectorization, which makes text processing significantly faster overall (+40% with AVX2). If you intentionally break my performance I'll break you. :)"
+#endif
+
+#pragma warning(push)
+}
+
+// This is somewhat of a weapon of last resort to get the ROW back into a state that doesn't break
+// callers too much. It discards the row (= releases the memory) but still ensures that it at least
+// contains proper whitespace text to avoid any invalid text from being visible or returned anywhere.
+void ROW::_safeReset() noexcept
+{
+    static constexpr TextAttribute emptyAttributes{};
+    // By first calling Initialize() and then Discard() we end up in a state
+    // where _initialized is false, but the contents are still sort of valid.
+    Initialize();
+    Reset(emptyAttributes);
 }
 
 void ROW::TransferAttributes(const til::small_rle<TextAttribute, uint16_t, 1>& attr, til::CoordType newWidth)
@@ -365,7 +479,7 @@ catch (...)
     // Due to this function writing _charOffsets first, then calling _resizeChars (which may throw) and only then finally
     // filling in _chars, we might end up in a situation were _charOffsets contains offsets outside of the _chars array.
     // --> Restore this row to a known "okay"-state.
-    Reset(TextAttribute{});
+    _safeReset();
     throw;
 }
 
@@ -416,7 +530,7 @@ try
 }
 catch (...)
 {
-    Reset(TextAttribute{});
+    _safeReset();
     throw;
 }
 
@@ -456,7 +570,7 @@ catch (...)
     charsConsumed = ch - chBeg;
 }
 
-[[msvc::forceinline]] void ROW::WriteHelper::ReplaceTextUnicode(size_t ch, std::wstring_view::const_iterator it, const std::wstring_view::const_iterator end)
+[[msvc::forceinline]] void ROW::WriteHelper::ReplaceTextUnicode(size_t ch, std::wstring_view::const_iterator it, const std::wstring_view::const_iterator end) noexcept
 {
     while (it != end)
     {
@@ -546,7 +660,7 @@ try
 }
 catch (...)
 {
-    Reset(TextAttribute{});
+    _safeReset();
     throw;
 }
 

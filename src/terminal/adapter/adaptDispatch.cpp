@@ -2436,7 +2436,7 @@ void AdaptDispatch::_DoLineFeed(TextBuffer& textBuffer, const bool withReturn, c
         {
             auto eraseAttributes = textBuffer.GetCurrentAttributes();
             eraseAttributes.SetStandardErase();
-            textBuffer.GetRowByOffset(newPosition.y).Reset(eraseAttributes);
+            textBuffer.ResetRowByOffset(newPosition.y, eraseAttributes);
         }
     }
     else
