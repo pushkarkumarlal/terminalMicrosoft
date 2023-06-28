@@ -92,8 +92,7 @@ page](https://chocolatey.org/packages/microsoft-windows-terminal) and follow the
 
 #### Via Scoop (unofficial)
 
-[Scoop](https://scoop.sh) users can download and install the latest Terminal
-release by installing the `windows-terminal` package:
+[Scoop](https://scoop.sh) users can download and install the latest Terminal release by adding the extras bucket and installing the `microsoft-terminal` package:
 
 ```powershell
 scoop bucket add extras
@@ -105,6 +104,8 @@ To update Windows Terminal using Scoop, run the following:
 ```powershell
 scoop update windows-terminal
 ```
+
+> ##### **Note**: that Scoop installation is not officially supported by the Windows Terminal team.
 
 If you have any issues when installing/updating the package, please search for
 or report the same on the [issues
